@@ -44,3 +44,9 @@ for _ in range(video_length):
 
 record_env.close()
 
+# TODO: implement this from scratch
+"""
+1. atri processing
+2. CNN/MLP network
+3. the PPO algorithms
+"""
