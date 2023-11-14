@@ -4,3 +4,8 @@ Key features:
 - the clear code style
 - detailed comments
 - easy to run and no mistakes
+
+## file structure
+- notebook: the basic RL algorithms to train the simple env: CartPole
+- atari_game: the DQN network to train the atari games
+- robotics: the most contribution of my repo, using different methods to train the robotics arms
