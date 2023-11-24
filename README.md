@@ -13,6 +13,10 @@ Key features:
 - atari_game: the DQN network to train the atari games
 - robotics: the most contribution of my repo, using different methods to train the robotics arms
 
+## Atari Games (DQN)
+
+![Video](atari_rl/atari_games/video.mp4)
+
 ## Robotic Arm Task (Soft-Actor-Critic)
 
 ![result figure](plots/PandaReachDense-v3.png)
