@@ -1,10 +1,5 @@
 import gymnasium as gym
 import numpy as np
-# these are new packages in this file
-import panda_gym
-import stable_baselines3
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from stable_baselines3.common.env_util import make_vec_env
 from collections import deque
 import matplotlib.pyplot as plt
 
@@ -18,30 +13,14 @@ import imageio
 import tensorboard
 from torch.utils.tensorboard import SummaryWriter
 
-env = gym.make("PandaReachDense-v3")
+env = gym.make("CartPole-v1")
 observation, info = env.reset(seed=42)
 action = env.action_space.sample()
 print(f'observation: {observation}')
 print(f'action: {action}')
 
-print(f'observation space: {env.observation_space.shape}')
-print(f'action space: {env.action_space.shape}')
-
-def observation_preprocessing(obs) -> np.array:
-    obs = np.concatenate([observation['observation'], observation['desired_goal'], observation['achieved_goal']])
-    obs_min = np.min(obs)
-    obs_max = np.max(obs)
-    obs = (obs - obs_min) / (obs_max - obs_min)
-    
-    return obs
-
-# test the observation_preprocessing function
-obs,_ = env.reset()
-print(f'obs: {obs}')
-preprocessed_obs = observation_preprocessing(obs)
-print(f'preprocessed obs: {preprocessed_obs}')
-print(f'preprocessed obs length: {len(preprocessed_obs)}')
-# well done
+print(f'observation space: {env.observation_space}')
+print(f'action space: {env.action_space.n}')
 
 # network architecture
 class Actor(nn.Module):
@@ -54,8 +33,7 @@ class Actor(nn.Module):
 
         self.fc1 = nn.Linear(state_dim,256)
         self.fc2 = nn.Linear(256,256)
-        self.mu = nn.Linear(256,action_dim)
-        self.sigma = nn.Linear(256,action_dim)
+        self.fc_out = nn.Linear(256,action_dim)
         
         self.optimizer = optim.Adam(self.parameters(),lr=lr)
         self.to(device)
@@ -64,52 +42,47 @@ class Actor(nn.Module):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
         
-        # note that the activation function is `tanh` rather than `relu`
-        mu = torch.tanh(self.mu(x))
-        sigma = torch.exp(torch.clamp(self.sigma(x),min=-20,max=2))
-        return mu, sigma
+        action_probs = F.softmax(self.fc_out(x),dim=-1)
+        return action_probs
     
     def sample_action(self,state):
-        mu,sigma = self(state)
-        dist = torch.distributions.Normal(mu,sigma)
+        action_probs = self(state)
+        dist = torch.distributions.Categorical(action_probs)
         action = dist.sample()
         log_prob = dist.log_prob(action)
         return action.detach(),log_prob.detach()
-    
-# test Actor Network
-state_dim = len(preprocessed_obs)
-action_dim = env.action_space.shape[0]
-print(f'state dim {state_dim} action dim {action_dim}')
+
+state_dim = env.observation_space.shape[0]
+action_dim = env.action_space.n
+
 lr = 1e-3
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f'device: {device}')
 actor = Actor(state_dim,action_dim,lr,device)
-print(actor)
-mu,sigma = actor(torch.from_numpy(preprocessed_obs).float().unsqueeze(0).to(device))
-# print(torch.from_numpy(preprocessed_obs).float().unsqueeze(0).shape)
-print(f'mu: {mu}')
-print(f'sigma: {sigma}')
-
-action, log_prob = actor.sample_action(torch.from_numpy(preprocessed_obs).float().unsqueeze(0).to(device))
-print(f'action: {action}')
-print(f'log prob: {log_prob}')
-# good job!!
+action_probs = actor(torch.tensor(observation).float().to(device))
+print(action_probs)
 
 class Critic(nn.Module):
     def __init__(self,
                  state_dim: int,
-                 action_dim: int,
                  lr: float,
                  device):
         
         super(Critic,self).__init__()
-        self.fc1 = nn.Linear(state_dim + action_dim, 256)
+        self.fc1 = nn.Linear(state_dim + 1, 256)
         self.fc2 = nn.Linear(256,256)
         self.fc3 = nn.Linear(256,1)
         self.optimizer = optim.Adam(self.parameters(),lr=lr)
         self.to(device)
         
     def forward(self,state,action):
+        if state.dim() == 1:
+          state = state.unsqueeze(0)
+
+        # Unsqueeze the action tensor for the same reason
+        if action.dim() == 1:
+          action = action.unsqueeze(-1)
+
         x = torch.cat([state,action],dim=1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -117,15 +90,17 @@ class Critic(nn.Module):
         
         return value
     
-# test Critic Network
-action = env.action_space.sample()
-critic = Critic(state_dim,action_dim,lr,device)
-print(critic)
-value = critic(torch.from_numpy(preprocessed_obs).float().unsqueeze(0).to(device),torch.tensor(action).float().unsqueeze(0).to(device))
-# print(torch.tensor(action).float().unsqueeze(0).shape)
-print(f'value: {value}')
+# Ensure observation is a tensor
+if not isinstance(observation, torch.Tensor):
+    observation = torch.tensor(observation, dtype=torch.float32, device=device)
 
-# I am the best coder!
+# Ensure action is a tensor and has the correct shape
+if not isinstance(action, torch.Tensor):
+    action = torch.tensor([action], dtype=torch.float32, device=device)  # Enclose action in a list to create a 1D tensor
+
+critic = Critic(state_dim,lr,device)
+value = critic(observation, action)
+print(f'value: {value}')
 
 # bulid the Agent: init, learn, predict
 class Agent():
@@ -139,11 +114,11 @@ class Agent():
                  device: torch.device):
         
         self.actor = Actor(state_dim,action_dim,actor_lr,device)
-        self.critic1 = Critic(state_dim,action_dim,critic_lr,device)
-        self.critic2 = Critic(state_dim,action_dim,lr,device)
+        self.critic1 = Critic(state_dim,critic_lr,device)
+        self.critic2 = Critic(state_dim,lr,device)
         
-        self.target_critic1 = Critic(state_dim,action_dim,lr,device)
-        self.target_critic2 = Critic(state_dim,action_dim,lr,device)
+        self.target_critic1 = Critic(state_dim,lr,device)
+        self.target_critic2 = Critic(state_dim,lr,device)
         
         
         self.device = device
@@ -165,10 +140,10 @@ class Agent():
     
     def learn(self,state,action,reward,next_state,done):
         # Convert states, actions, rewards, and dones to tensors
-        state = torch.FloatTensor(state).to(self.device)
-        action = torch.FloatTensor(action).to(self.device)
+        state = torch.tensor(state, dtype=torch.float32, device=self.device)
+        action = torch.tensor(action, dtype=torch.float32, device=self.device).unsqueeze(-1)
+        next_state = torch.tensor(next_state, dtype=torch.float32, device=self.device)
         reward = torch.FloatTensor(reward).unsqueeze(1).to(self.device)
-        next_state = torch.FloatTensor(next_state).to(self.device)
         done = torch.FloatTensor(done).unsqueeze(1).to(self.device)
         
         
@@ -177,8 +152,8 @@ class Agent():
             target_Q1 = self.target_critic1(next_state,next_action)
             target_Q2 = self.target_critic2(next_state,next_action)
             # Sum log probabilities across action dimensions
-            next_log_prob_sum = next_log_prob.sum(dim=1, keepdim=True)  
-            target_V = torch.min(target_Q1,target_Q2) - next_log_prob_sum
+            next_log_prob = next_log_prob.reshape(-1,1)
+            target_V = torch.min(target_Q1,target_Q2) - next_log_prob
             target_Q = reward + (1 - done) * self.gamma * target_V
             
         current_Q1 = self.critic1(state,action)
@@ -232,7 +207,7 @@ class ReplayBuffer:
 
     def __len__(self):
         return len(self.buffer)
-
+    
 # Example usage
 buffer_capacity = 10000  # Size of the replay buffer
 replay_buffer = ReplayBuffer(buffer_capacity)
@@ -250,7 +225,6 @@ def should_update(replay_buffer, batch_size):
 def sample_batch(replay_buffer, batch_size):
     return replay_buffer.sample(batch_size)
 
-
 def train(agent,env,num_episodes,batch_size):
     episode_rewards = []
     
@@ -261,13 +235,11 @@ def train(agent,env,num_episodes,batch_size):
         episode_reward = 0
         
         while not done:
-            action = agent.predict(observation_preprocessing(state))
+            action = agent.predict(state)
             
             next_state,reward,terminated,truncated,info = env.step(action)
             done = terminated or truncated
-            state_ = observation_preprocessing(state)
-            next_state_ = observation_preprocessing(next_state)
-            store_transition(state_, action, reward, next_state_, done)
+            store_transition(state, action, reward, next_state, done)
             state = next_state
             episode_reward += reward
             
@@ -280,15 +252,13 @@ def train(agent,env,num_episodes,batch_size):
     
     return episode_rewards
 
-           
 actor_lr = 1e-3
 critic_lr = 1e-3
 gamma = 0.99
 tau = 0.005
 
-RobotAgent = Agent(state_dim,action_dim,actor_lr,critic_lr,gamma,tau,device)
-print(RobotAgent)
+CartPoleAgent = Agent(state_dim,action_dim,actor_lr,critic_lr,gamma,tau,device)
 
 num_episodes = 10
 batch_size = 128
-train(RobotAgent,env,num_episodes,batch_size)
+train(CartPoleAgent,env,num_episodes,batch_size)
